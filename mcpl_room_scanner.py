@@ -150,6 +150,18 @@ class ScanResult:
     errors: list[str] = field(default_factory=list)
 
 
+@dataclass
+class BookingResult:
+    ok: bool = False
+    dry_run: bool = False
+    reference: str = ""
+    message: str = ""
+    slot: OpenSlot | None = None
+    start_time: str = ""      # "YYYY-MM-DD HH:MM:SS"
+    end_time: str = ""
+    payload: dict | None = None
+
+
 # --------------------------------------------------------------------------
 # Scanning
 # --------------------------------------------------------------------------
@@ -314,6 +326,166 @@ def build_email_body(result: ScanResult, scope: str, window: str = "10am-12pm") 
     return "\n".join(text_lines), "\n".join(html_lines)
 
 
+# --------------------------------------------------------------------------
+# Booking (submits a real reservation to Communico - only runs with --book)
+# --------------------------------------------------------------------------
+
+BOOKING_FIELDS = ("BOOK_FIRST_NAME", "BOOK_LAST_NAME", "BOOK_EMAIL", "BOOK_LIBRARY_CARD")
+MYRESERVATIONS_URL = "https://mcpl.libnet.info/myreservations"
+
+
+def pick_slot(slots: list[OpenSlot], branch_order: list[str]) -> OpenSlot | None:
+    """Choose one slot: first branch (in branch_order, substring match, case-
+    insensitive) that has an open room; within a branch, first room by name.
+    Falls back to any room sorted by (branch, room_name)."""
+    if not slots:
+        return None
+    for term in branch_order:
+        term = term.strip().lower()
+        if not term:
+            continue
+        matches = sorted((s for s in slots if term in s.branch.lower()),
+                         key=lambda s: s.room_name)
+        if matches:
+            return matches[0]
+    return sorted(slots, key=lambda s: (s.branch, s.room_name))[0]
+
+
+def book_room(slot: OpenSlot, day: date_cls, start_hm: str, end_hm: str,
+              dry_run: bool = False, verbose: bool = False) -> BookingResult:
+    """Submit a room reservation to Communico for `slot` on `day` covering
+    start_hm-end_hm. Reads patron details from BOOK_* environment vars."""
+    missing = [k for k in BOOKING_FIELDS if not os.environ.get(k)]
+    if missing:
+        return BookingResult(ok=False,
+                             message=f"missing booking details in env: {', '.join(missing)}")
+
+    start_time = f"{day.isoformat()} {start_hm}:00"
+    end_time = f"{day.isoformat()} {end_hm}:00"
+    payload = {
+        "room_id": slot.room_id,
+        "layout_id": "",
+        "start_time": start_time,
+        "end_time": end_time,
+        "expected_attendees": os.environ.get("BOOK_ATTENDEES", "1"),
+        "patron_notes": os.environ.get("BOOK_NOTES", ""),
+        "customQuestions": "{}",
+        "class_id": CLASS_ID,
+        "contact[first_name]": os.environ["BOOK_FIRST_NAME"],
+        "contact[last_name]": os.environ["BOOK_LAST_NAME"],
+        "contact[phone]": os.environ.get("BOOK_PHONE", ""),
+        "contact[email]": os.environ["BOOK_EMAIL"],
+        "contact[librarycard]": os.environ["BOOK_LIBRARY_CARD"],
+        "contact[group_name]": "",
+        "contact[booking_title]": os.environ.get("BOOK_NOTES", ""),
+    }
+
+    result = BookingResult(dry_run=dry_run, slot=slot,
+                           start_time=start_time, end_time=end_time,
+                           payload=payload)
+
+    room_link = f"{RESERVE_PAGE}?date={day.isoformat()}&roomId={slot.room_id}"
+    sess = requests.Session()
+    sess.headers.update({
+        "User-Agent": REQUEST_HEADERS["User-Agent"],
+        "Referer": room_link,
+        "Origin": RESERVE_PAGE.rsplit("/", 1)[0],
+        "X-Requested-With": "XMLHttpRequest",
+    })
+
+    try:
+        # 1. land on the reserve page to pick up session / LB cookies
+        sess.get(RESERVE_PAGE, params={"date": day.isoformat(), "roomId": slot.room_id},
+                 timeout=REQUEST_TIMEOUT).raise_for_status()
+
+        # 2. pre-flight check (validates card, catches "already booked" etc.)
+        try:
+            chk = sess.get(f"{RESERVE_PAGE.rsplit('/', 1)[0]}/ajax/fetch/check_room_booking",
+                           params={"room_id": slot.room_id, "start_time": start_time,
+                                   "end_time": end_time,
+                                   "librarycard": os.environ["BOOK_LIBRARY_CARD"],
+                                   "email": os.environ["BOOK_EMAIL"], "class_id": CLASS_ID},
+                           timeout=REQUEST_TIMEOUT)
+            cj = chk.json() if chk.ok else {}
+            if verbose:
+                print(f"  check_room_booking -> {cj}", file=sys.stderr)
+            if cj and cj.get("ok") is False and cj.get("message"):
+                result.message = f"pre-check failed: {cj['message']}"
+                return result
+        except (requests.RequestException, ValueError):
+            pass  # pre-check is best-effort; the submit below is authoritative
+
+        if dry_run:
+            result.ok = True
+            result.message = "dry run - reservation NOT submitted"
+            return result
+
+        # 3. submit
+        resp = sess.post(RESERVE_PAGE, params={"action": "submit"}, data=payload,
+                         timeout=REQUEST_TIMEOUT)
+        resp.raise_for_status()
+        try:
+            data = resp.json()
+        except ValueError:
+            result.message = f"non-JSON response from submit (HTTP {resp.status_code})"
+            return result
+
+        if verbose:
+            print(f"  submit -> {data}", file=sys.stderr)
+        if data.get("ok"):
+            result.ok = True
+            result.reference = str(data.get("reference", ""))
+            result.message = str(data.get("message", "booking confirmed"))
+        else:
+            result.message = str(data.get("message") or "booking rejected (no message)")
+    except requests.RequestException as exc:
+        result.message = f"request failed: {exc}"
+    return result
+
+
+def build_booking_body(res: BookingResult, day: date_cls, window: str) -> tuple[str, str, str]:
+    """Returns (subject, text_body, html_body) for a booking outcome."""
+    pretty = day.strftime("%A, %B %d")
+    if res.slot is None:
+        subj = f"MCPL booking: nothing open {window} on {pretty}"
+        body = f"No {window} openings on {pretty} - nothing was booked."
+        return subj, body, f"<p>{body}</p>"
+
+    where = f"{res.slot.room_name} @ {res.slot.branch}"
+    when = f"{pretty}, {window}"
+    if res.dry_run and not res.message.startswith("pre-check failed"):
+        subj = f"MCPL booking DRY RUN: would book {where}"
+        lines = [f"DRY RUN - nothing was submitted.", "",
+                 f"Would book: {where}", f"When: {when}", "",
+                 "POST /reserve?action=submit payload:"]
+        for k, v in (res.payload or {}).items():
+            lines.append(f"  {k} = {v}")
+        text = "\n".join(lines)
+        return subj, text, "<pre>" + text.replace("<", "&lt;") + "</pre>"
+    if res.ok:
+        subj = f"MCPL room BOOKED: {where} - {when}"
+        lines = [f"Booked: {where}", f"When: {when}"]
+        if res.reference:
+            lines.append(f"Confirmation ref: {res.reference}")
+        if res.message and res.message != "booking confirmed":
+            lines.append(f"Note: {res.message}")
+        lines += ["", f"Manage / cancel: {MYRESERVATIONS_URL}"]
+        text = "\n".join(lines)
+        html = ("<h2>Room booked</h2><p><b>" + where + "</b><br>" + when +
+                (f"<br>Confirmation ref: {res.reference}" if res.reference else "") +
+                f'</p><p><a href="{MYRESERVATIONS_URL}">Manage / cancel this booking</a></p>')
+        return subj, text, html
+    subj = f"MCPL booking FAILED: {where} - {when}"
+    text = (f"Tried to book {where} for {when} but it did NOT go through.\n\n"
+            f"Reason: {res.message}\n\n"
+            f"Book manually: {RESERVE_PAGE}?date={day.isoformat()}&roomId={res.slot.room_id}")
+    html = (f"<h2>Booking failed</h2><p>Tried: <b>{where}</b><br>{when}</p>"
+            f"<p>Reason: {res.message}</p>"
+            f'<p><a href="{RESERVE_PAGE}?date={day.isoformat()}&amp;roomId={res.slot.room_id}">'
+            f"Book it manually</a></p>")
+    return subj, text, html
+
+
 def send_email(subject: str, text_body: str, html_body: str) -> None:
     host = os.environ.get("SMTP_HOST")
     port = int(os.environ.get("SMTP_PORT", "587"))
@@ -356,6 +528,16 @@ def main() -> None:
                         help=f"window start time, 24h (default {TARGET_START})")
     parser.add_argument("--end", default=TARGET_END, metavar="HH:MM",
                         help=f"window end time, 24h (default {TARGET_END})")
+    parser.add_argument("--book", action="store_true",
+                        help="SUBMIT a real reservation for the first open room (needs "
+                             "BOOK_* vars in mcpl_scanner.env and a single target day via "
+                             "--date or --next-business-day)")
+    parser.add_argument("--dry-run", dest="dry_run", action="store_true",
+                        help="with --book: do everything except the final submit; print the payload")
+    parser.add_argument("--branches", default=None,
+                        help="comma-separated branch preference order for --book "
+                             "(substring match), e.g. 'Twinbrook,Aspen Hill,Davis'. "
+                             "Defaults to BOOK_BRANCH_ORDER from the env file.")
     parser.add_argument("--always-email", action="store_true", help="email even when nothing is open")
     parser.add_argument("--print", dest="print_only", action="store_true",
                         help="print the openings to the terminal and never send mail "
@@ -399,8 +581,54 @@ def main() -> None:
         print("Today is Sunday - MCPL branches are closed today, but scanning "
               "the upcoming (non-Sunday) days anyway.", file=sys.stderr)
 
+    if args.book and only_date is None:
+        parser.error("--book needs a single target day: pass --date or --next-business-day")
+    if args.dry_run and not args.book:
+        parser.error("--dry-run only applies together with --book")
+
     result = scan(days_ahead=args.days, verbose=args.verbose, only_date=only_date,
                   start_hm=args.start, end_hm=args.end)
+
+    # ---- booking path -------------------------------------------------------
+    if args.book:
+        branch_order = (args.branches
+                        if args.branches is not None
+                        else os.environ.get("BOOK_BRANCH_ORDER", "")).split(",")
+        chosen = pick_slot(result.open_slots, branch_order)
+        if chosen is None:
+            bres = BookingResult(message="no open room in the window")
+        else:
+            bres = book_room(chosen, only_date, args.start, args.end,
+                             dry_run=args.dry_run, verbose=args.verbose)
+        subject, text_body, html_body = build_booking_body(bres, only_date, window)
+
+        if args.print_only:
+            print(subject + "\n\n" + text_body)
+        elif args.emit_json:
+            json.dump({
+                "mode": "book",
+                "should_notify": True,
+                "subject": subject,
+                "text_body": text_body,
+                "html_body": html_body,
+                "booking": {
+                    "ok": bres.ok, "dry_run": bres.dry_run,
+                    "reference": bres.reference, "message": bres.message,
+                    "branch": chosen.branch if chosen else None,
+                    "room_name": chosen.room_name if chosen else None,
+                    "room_id": chosen.room_id if chosen else None,
+                    "date": only_date.isoformat(),
+                    "start": args.start, "end": args.end,
+                },
+                "candidates": [vars(s) for s in result.open_slots],
+                "errors": result.errors,
+            }, sys.stdout, indent=2)
+            sys.stdout.write("\n")
+        else:
+            send_email(subject, text_body, html_body)
+            print(subject)
+        return
+    # ----------------------------------------------------------------------
 
     if only_date:
         pretty = only_date.strftime("%A, %b %d")

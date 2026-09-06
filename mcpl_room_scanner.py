@@ -115,8 +115,16 @@ CLASS_ID = "580"  # public/unmediated booking class used by the site
 API_URL = "https://api.communico.co/v2/mcpl/roomsbyclass/{ids}"
 RESERVE_PAGE = "https://mcpl.libnet.info/reserve"
 
-TARGET_START = "10:00"  # 24h "HH:MM", America/New_York
+TARGET_START = "10:00"  # 24h "HH:MM", America/New_York (default; override with --start/--end)
 TARGET_END = "12:00"
+
+
+def window_label(start_hm: str, end_hm: str) -> str:
+    """'10:00','12:00' -> '10am-12pm'  (drops ':00', lowercases am/pm)."""
+    def fmt(hm: str) -> str:
+        t = datetime.strptime(hm, "%H:%M")
+        return t.strftime("%I:%M%p").lstrip("0").replace(":00", "").lower()
+    return f"{fmt(start_hm)}-{fmt(end_hm)}"
 
 DAYS_AHEAD_DEFAULT = 7  # the site's own furthest_booking_days at last check
 REQUEST_TIMEOUT = 15
@@ -210,7 +218,8 @@ def branch_name_for_location_id(location_id: str) -> str:
 
 
 def scan(days_ahead: int = DAYS_AHEAD_DEFAULT, verbose: bool = False,
-         only_date: date_cls | None = None) -> ScanResult:
+         only_date: date_cls | None = None,
+         start_hm: str = TARGET_START, end_hm: str = TARGET_END) -> ScanResult:
     result = ScanResult()
     today = datetime.now(TIMEZONE).date()
 
@@ -231,7 +240,7 @@ def scan(days_ahead: int = DAYS_AHEAD_DEFAULT, verbose: bool = False,
             continue
 
         for room in rooms:
-            if room_is_open_for_window(room, day, TARGET_START, TARGET_END):
+            if room_is_open_for_window(room, day, start_hm, end_hm):
                 result.open_slots.append(
                     OpenSlot(
                         date=day.isoformat(),
@@ -261,11 +270,12 @@ def load_env_file(path: Path) -> None:
         os.environ.setdefault(key, value)
 
 
-def build_email_body(result: ScanResult, scope: str) -> tuple[str, str]:
+def build_email_body(result: ScanResult, scope: str, window: str = "10am-12pm") -> tuple[str, str]:
     """Returns (plain_text, html) email bodies. `scope` describes the date
-    range scanned, e.g. "next 7 days" or "on 2026-09-08"."""
+    range scanned, e.g. "next 7 days" or "on 2026-09-08"; `window` is the
+    time-of-day label, e.g. "10am-12pm"."""
     if not result.open_slots:
-        text = f"No 10:00am-12:00pm openings found {scope} at your watched branches."
+        text = f"No {window} openings found {scope} at your watched branches."
         html = f"<p>{text}</p>"
         return text, html
 
@@ -273,8 +283,8 @@ def build_email_body(result: ScanResult, scope: str) -> tuple[str, str]:
     for slot in result.open_slots:
         by_date.setdefault(slot.date, []).append(slot)
 
-    text_lines = [f"10am-12pm study room openings - {scope}", ""]
-    html_lines = [f"<h2>10am–12pm study room openings</h2>"]
+    text_lines = [f"{window} study room openings - {scope}", ""]
+    html_lines = [f"<h2>{window} study room openings</h2>"]
 
     for day in sorted(by_date):
         pretty_day = datetime.strptime(day, "%Y-%m-%d").strftime("%A, %B %d")
@@ -342,6 +352,10 @@ def main() -> None:
     parser.add_argument("--next-business-day", dest="next_business_day", action="store_true",
                         help="scan ONLY the next day MCPL is open (tomorrow, or Monday if "
                              "tomorrow is Sunday); ignores --days and --date")
+    parser.add_argument("--start", default=TARGET_START, metavar="HH:MM",
+                        help=f"window start time, 24h (default {TARGET_START})")
+    parser.add_argument("--end", default=TARGET_END, metavar="HH:MM",
+                        help=f"window end time, 24h (default {TARGET_END})")
     parser.add_argument("--always-email", action="store_true", help="email even when nothing is open")
     parser.add_argument("--print", dest="print_only", action="store_true",
                         help="print the openings to the terminal and never send mail "
@@ -366,13 +380,27 @@ def main() -> None:
         except ValueError:
             parser.error(f"--date must be YYYY-MM-DD, got {args.date!r}")
 
+    times = {}
+    for label, val in (("--start", args.start), ("--end", args.end)):
+        try:
+            times[label] = datetime.strptime(val, "%H:%M").time()
+        except ValueError:
+            parser.error(f"{label} must be HH:MM (24h), got {val!r}")
+    if times["--start"] >= times["--end"]:
+        parser.error(f"--start ({args.start}) must be before --end ({args.end})")
+    # normalise to zero-padded HH:MM so "9:00" and "09:00" behave identically
+    args.start = times["--start"].strftime("%H:%M")
+    args.end = times["--end"].strftime("%H:%M")
+    window = window_label(args.start, args.end)
+
     load_env_file(Path(__file__).with_name("mcpl_scanner.env"))
 
     if only_date is None and datetime.now(TIMEZONE).date().weekday() == 6:
         print("Today is Sunday - MCPL branches are closed today, but scanning "
               "the upcoming (non-Sunday) days anyway.", file=sys.stderr)
 
-    result = scan(days_ahead=args.days, verbose=args.verbose, only_date=only_date)
+    result = scan(days_ahead=args.days, verbose=args.verbose, only_date=only_date,
+                  start_hm=args.start, end_hm=args.end)
 
     if only_date:
         pretty = only_date.strftime("%A, %b %d")
@@ -381,11 +409,11 @@ def main() -> None:
     else:
         scope_human = f"in the next {args.days} days"
         scope_short = f"next {args.days} days"
-    text_body, html_body = build_email_body(result, scope_short)
+    text_body, html_body = build_email_body(result, scope_short, window)
     subject = (
-        f"MCPL rooms: {len(result.open_slots)} 10am-12pm opening(s) found"
+        f"MCPL rooms: {len(result.open_slots)} {window} opening(s) found"
         if result.open_slots
-        else "MCPL rooms: no 10am-12pm openings right now"
+        else f"MCPL rooms: no {window} openings right now"
     )
     should_notify = bool(result.open_slots) or args.always_email
 

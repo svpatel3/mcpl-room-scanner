@@ -105,10 +105,11 @@ ALL_LOCATIONS = {
     "White Oak Library": "1779",
 }
 
-# The four branches you asked to watch.
+# The branches you asked to watch.
 WATCHED_LOCATIONS = {
     name: ALL_LOCATIONS[name]
-    for name in ("Aspen Hill Library", "Kensington Park Library", "Twinbrook Library", "Davis Library")
+    for name in ("Aspen Hill Library", "Kensington Park Library", "Twinbrook Library",
+                 "Wheaton Library", "Davis Library")
 }
 
 CLASS_ID = "580"  # public/unmediated booking class used by the site

@@ -376,8 +376,9 @@ def book_room(slot: OpenSlot, day: date_cls, start_hm: str, end_hm: str,
         "contact[phone]": os.environ.get("BOOK_PHONE", ""),
         "contact[email]": os.environ["BOOK_EMAIL"],
         "contact[librarycard]": os.environ["BOOK_LIBRARY_CARD"],
-        "contact[group_name]": "",
-        "contact[booking_title]": os.environ.get("BOOK_NOTES", ""),
+        "contact[group_name]": (os.environ.get("BOOK_GROUP_NAME")
+                                or f"{os.environ['BOOK_FIRST_NAME']} {os.environ['BOOK_LAST_NAME']}"),
+        "contact[booking_title]": os.environ.get("BOOK_TITLE", "Study session"),
     }
 
     result = BookingResult(dry_run=dry_run, slot=slot,

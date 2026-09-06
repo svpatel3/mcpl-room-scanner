@@ -282,11 +282,18 @@ def build_email_body(result: ScanResult, scope: str) -> tuple[str, str]:
         text_lines.append(f"{pretty_day} ({day})")
         html_lines.append(f"<h3>{pretty_day} <small>({day})</small></h3><ul>")
         for slot in sorted(by_date[day], key=lambda s: (s.branch, s.room_name)):
-            line = f"  - {slot.branch}: {slot.room_name} (fits {slot.capacity})"
-            text_lines.append(line)
-            html_lines.append(f"<li>{slot.branch}: <b>{slot.room_name}</b> (fits {slot.capacity})</li>")
-        text_lines.append(f"  Reserve: {link}")
-        html_lines.append(f"</ul><p><a href=\"{link}\">Reserve for {pretty_day}</a> (pick the branch/room above once there)</p>")
+            text_lines.append(
+                f"  - {slot.branch}: {slot.room_name} (fits {slot.capacity})  ->  {link}"
+            )
+            html_lines.append(
+                f"<li><a href=\"{link}\">{slot.branch}: <b>{slot.room_name}</b> "
+                f"(fits {slot.capacity})</a></li>"
+            )
+        html_lines.append(
+            f"</ul><p><a href=\"{link}\">Open the reservation page for {pretty_day}</a> "
+            f"(the site can't deep-link to a specific room - pick the branch/room above "
+            f"once the date is loaded)</p>"
+        )
         text_lines.append("")
 
     if result.errors:

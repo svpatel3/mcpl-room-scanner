@@ -331,6 +331,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--days", type=int, default=DAYS_AHEAD_DEFAULT, help="how many days ahead to scan")
     parser.add_argument("--date", help="scan ONLY this date (YYYY-MM-DD), ignoring --days")
+    parser.add_argument("--next-business-day", dest="next_business_day", action="store_true",
+                        help="scan ONLY the next day MCPL is open (tomorrow, or Monday if "
+                             "tomorrow is Sunday); ignores --days and --date")
     parser.add_argument("--always-email", action="store_true", help="email even when nothing is open")
     parser.add_argument("--print", dest="print_only", action="store_true",
                         help="print the openings to the terminal and never send mail "
@@ -343,7 +346,13 @@ def main() -> None:
     args = parser.parse_args()
 
     only_date = None
-    if args.date:
+    if args.next_business_day:
+        if args.date:
+            parser.error("use either --next-business-day or --date, not both")
+        only_date = datetime.now(TIMEZONE).date() + timedelta(days=1)
+        while only_date.weekday() == 6:  # Sunday - branches closed
+            only_date += timedelta(days=1)
+    elif args.date:
         try:
             only_date = datetime.strptime(args.date, "%Y-%m-%d").date()
         except ValueError:
@@ -357,8 +366,13 @@ def main() -> None:
 
     result = scan(days_ahead=args.days, verbose=args.verbose, only_date=only_date)
 
-    scope_human = f"on {only_date}" if only_date else f"in the next {args.days} days"
-    scope_short = f"on {only_date}" if only_date else f"next {args.days} days"
+    if only_date:
+        pretty = only_date.strftime("%A, %b %d")
+        scope_human = f"on {pretty} ({only_date})"
+        scope_short = f"for {pretty}"
+    else:
+        scope_human = f"in the next {args.days} days"
+        scope_short = f"next {args.days} days"
     text_body, html_body = build_email_body(result, scope_short)
     subject = (
         f"MCPL rooms: {len(result.open_slots)} 10am-12pm opening(s) found"

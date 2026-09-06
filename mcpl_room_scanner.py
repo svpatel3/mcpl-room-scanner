@@ -278,21 +278,22 @@ def build_email_body(result: ScanResult, scope: str) -> tuple[str, str]:
 
     for day in sorted(by_date):
         pretty_day = datetime.strptime(day, "%Y-%m-%d").strftime("%A, %B %d")
-        link = f"{RESERVE_PAGE}?date={day}"
+        day_link = f"{RESERVE_PAGE}?date={day}"
         text_lines.append(f"{pretty_day} ({day})")
         html_lines.append(f"<h3>{pretty_day} <small>({day})</small></h3><ul>")
         for slot in sorted(by_date[day], key=lambda s: (s.branch, s.room_name)):
+            # ?roomId= makes the reserve page pre-select this exact room and its
+            # branch; falls back to the date-only link if we somehow lack an id.
+            room_link = f"{day_link}&roomId={slot.room_id}" if slot.room_id else day_link
             text_lines.append(
-                f"  - {slot.branch}: {slot.room_name} (fits {slot.capacity})  ->  {link}"
+                f"  - {slot.branch}: {slot.room_name} (fits {slot.capacity})  ->  {room_link}"
             )
             html_lines.append(
-                f"<li><a href=\"{link}\">{slot.branch}: <b>{slot.room_name}</b> "
-                f"(fits {slot.capacity})</a></li>"
+                f"<li><a href=\"{room_link.replace('&', '&amp;')}\">{slot.branch}: "
+                f"<b>{slot.room_name}</b> (fits {slot.capacity})</a></li>"
             )
         html_lines.append(
-            f"</ul><p><a href=\"{link}\">Open the reservation page for {pretty_day}</a> "
-            f"(the site can't deep-link to a specific room - pick the branch/room above "
-            f"once the date is loaded)</p>"
+            f"</ul><p><a href=\"{day_link}\">Open the full day for {pretty_day}</a></p>"
         )
         text_lines.append("")
 

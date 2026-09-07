@@ -70,7 +70,7 @@ import os
 import smtplib
 import sys
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, date as date_cls
+from datetime import datetime, timedelta, timezone as _utc, date as date_cls
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
@@ -156,11 +156,13 @@ class BookingResult:
     ok: bool = False
     dry_run: bool = False
     reference: str = ""
+    booking_id: str = ""
     message: str = ""
     slot: OpenSlot | None = None
     start_time: str = ""      # "YYYY-MM-DD HH:MM:SS"
     end_time: str = ""
     payload: dict | None = None
+    ics_path: str = ""
 
 
 # --------------------------------------------------------------------------
@@ -437,12 +439,54 @@ def book_room(slot: OpenSlot, day: date_cls, start_hm: str, end_hm: str,
         if data.get("ok"):
             result.ok = True
             result.reference = str(data.get("reference", ""))
+            result.booking_id = str(data.get("id", ""))
             result.message = str(data.get("message", "booking confirmed"))
         else:
             result.message = str(data.get("message") or "booking rejected (no message)")
     except requests.RequestException as exc:
         result.message = f"request failed: {exc}"
     return result
+
+
+def _ics_escape(text: str) -> str:
+    return (text.replace("\\", "\\\\").replace("\n", "\\n")
+                .replace(",", "\\,").replace(";", "\\;"))
+
+
+def write_ics(res: BookingResult, day: date_cls, start_hm: str, end_hm: str) -> str:
+    """Write a calendar file for a confirmed booking; return its path."""
+    def to_utc(hm: str) -> str:
+        h, m = (int(x) for x in hm.split(":"))
+        local = datetime(day.year, day.month, day.day, h, m, tzinfo=TIMEZONE)
+        return local.astimezone(_utc.utc).strftime("%Y%m%dT%H%M%SZ")
+
+    slot = res.slot
+    uid = f"mcpl-{res.booking_id or res.reference or day.isoformat()}@mcpl.libnet.info"
+    desc = (f"Montgomery County Public Libraries room reservation.\n\n"
+            f"Room: {slot.room_name} ({slot.branch})\n"
+            f"Time: {window_label(start_hm, end_hm)} ET\n"
+            f"Confirmation ref: {res.reference}\nBooking id: {res.booking_id}\n\n"
+            f"Manage or cancel: {MYRESERVATIONS_URL}")
+    lines = [
+        "BEGIN:VCALENDAR", "VERSION:2.0",
+        "PRODID:-//mcpl-room-scanner//booking//EN",
+        "CALSCALE:GREGORIAN", "METHOD:PUBLISH", "BEGIN:VEVENT",
+        f"UID:{uid}",
+        f"DTSTAMP:{datetime.now(_utc.utc).strftime('%Y%m%dT%H%M%SZ')}",
+        f"DTSTART:{to_utc(start_hm)}", f"DTEND:{to_utc(end_hm)}",
+        f"SUMMARY:{_ics_escape(f'Study room - {slot.room_name} (MCPL)')}",
+        f"LOCATION:{_ics_escape(slot.branch)}",
+        f"DESCRIPTION:{_ics_escape(desc)}",
+        f"URL:{MYRESERVATIONS_URL}", "STATUS:CONFIRMED",
+        "BEGIN:VALARM", "ACTION:DISPLAY",
+        f"DESCRIPTION:{_ics_escape(f'Study room - {slot.room_name} in 30 minutes')}",
+        "TRIGGER:-PT30M", "END:VALARM", "END:VEVENT", "END:VCALENDAR",
+    ]
+    branch_slug = "".join(c.lower() if c.isalnum() else "-" for c in slot.branch).strip("-")
+    out_dir = Path(os.environ.get("BOOK_ICS_DIR") or Path(__file__).parent)
+    path = out_dir / f"mcpl-{branch_slug}-{day.isoformat()}.ics"
+    path.write_text("\r\n".join(lines) + "\r\n")
+    return str(path)
 
 
 def build_booking_body(res: BookingResult, day: date_cls, window: str) -> tuple[str, str, str]:
@@ -608,7 +652,16 @@ def main() -> None:
         else:
             bres = book_room(chosen, only_date, args.start, args.end,
                              dry_run=args.dry_run, verbose=args.verbose)
+
+        if bres.ok and not bres.dry_run:
+            try:
+                bres.ics_path = write_ics(bres, only_date, args.start, args.end)
+            except OSError as exc:
+                print(f"warning: could not write .ics ({exc})", file=sys.stderr)
+
         subject, text_body, html_body = build_booking_body(bres, only_date, window)
+        if bres.ics_path:
+            text_body += f"\n\nCalendar file: {bres.ics_path}"
 
         if args.print_only:
             print(subject + "\n\n" + text_body)
@@ -619,9 +672,11 @@ def main() -> None:
                 "subject": subject,
                 "text_body": text_body,
                 "html_body": html_body,
+                "ics_path": bres.ics_path,
                 "booking": {
                     "ok": bres.ok, "dry_run": bres.dry_run,
-                    "reference": bres.reference, "message": bres.message,
+                    "reference": bres.reference, "booking_id": bres.booking_id,
+                    "message": bres.message,
                     "branch": chosen.branch if chosen else None,
                     "room_name": chosen.room_name if chosen else None,
                     "room_id": chosen.room_id if chosen else None,
@@ -635,6 +690,8 @@ def main() -> None:
         else:
             send_email(subject, text_body, html_body)
             print(subject)
+            if bres.ics_path:
+                print(f"Calendar file: {bres.ics_path}")
         return
     # ----------------------------------------------------------------------
 

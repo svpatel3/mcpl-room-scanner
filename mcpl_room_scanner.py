@@ -109,7 +109,7 @@ ALL_LOCATIONS = {
 WATCHED_LOCATIONS = {
     name: ALL_LOCATIONS[name]
     for name in ("Aspen Hill Library", "Kensington Park Library", "Twinbrook Library",
-                 "Wheaton Library", "Davis Library")
+                 "Wheaton Library", "Davis Library", "Connie Morella Library")
 }
 
 CLASS_ID = "580"  # public/unmediated booking class used by the site

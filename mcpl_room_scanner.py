@@ -474,12 +474,12 @@ def write_ics(res: BookingResult, day: date_cls, start_hm: str, end_hm: str) -> 
         f"UID:{uid}",
         f"DTSTAMP:{datetime.now(_utc.utc).strftime('%Y%m%dT%H%M%SZ')}",
         f"DTSTART:{to_utc(start_hm)}", f"DTEND:{to_utc(end_hm)}",
-        f"SUMMARY:{_ics_escape(f'Study room - {slot.room_name} (MCPL)')}",
+        f"SUMMARY:{_ics_escape(f'{slot.branch} - {slot.room_name} MCPL')}",
         f"LOCATION:{_ics_escape(slot.branch)}",
         f"DESCRIPTION:{_ics_escape(desc)}",
         f"URL:{MYRESERVATIONS_URL}", "STATUS:CONFIRMED",
         "BEGIN:VALARM", "ACTION:DISPLAY",
-        f"DESCRIPTION:{_ics_escape(f'Study room - {slot.room_name} in 30 minutes')}",
+        f"DESCRIPTION:{_ics_escape(f'{slot.branch} - {slot.room_name} MCPL in 30 minutes')}",
         "TRIGGER:-PT30M", "END:VALARM", "END:VEVENT", "END:VCALENDAR",
     ]
     branch_slug = "".join(c.lower() if c.isalnum() else "-" for c in slot.branch).strip("-")

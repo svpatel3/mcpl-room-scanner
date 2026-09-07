@@ -540,6 +540,9 @@ def main() -> None:
                         help="comma-separated branch preference order for --book "
                              "(substring match), e.g. 'Twinbrook,Aspen Hill,Davis'. "
                              "Defaults to BOOK_BRANCH_ORDER from the env file.")
+    parser.add_argument("--room", default=None,
+                        help="with --book: only consider rooms whose name contains this "
+                             "text (case-insensitive), e.g. 'Wheaton 6'")
     parser.add_argument("--always-email", action="store_true", help="email even when nothing is open")
     parser.add_argument("--print", dest="print_only", action="store_true",
                         help="print the openings to the terminal and never send mail "
@@ -596,7 +599,10 @@ def main() -> None:
         branch_order = (args.branches
                         if args.branches is not None
                         else os.environ.get("BOOK_BRANCH_ORDER", "")).split(",")
-        chosen = pick_slot(result.open_slots, branch_order)
+        candidates = result.open_slots
+        if args.room:
+            candidates = [s for s in candidates if args.room.lower() in s.room_name.lower()]
+        chosen = pick_slot(candidates, branch_order)
         if chosen is None:
             bres = BookingResult(message="no open room in the window")
         else:

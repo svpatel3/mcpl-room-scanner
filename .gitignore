@@ -2,3 +2,4 @@ mcpl_scanner.env
 __pycache__/
 *.pyc
 mcpl_scanner.log
+mcpl-*.ics

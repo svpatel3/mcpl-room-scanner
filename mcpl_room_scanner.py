@@ -487,6 +487,7 @@ def record_booking(res: "BookingResult", day: date_cls, start_hm: str, end_hm: s
         "branch": res.slot.branch, "room_name": res.slot.room_name,
         "room_id": res.slot.room_id, "date": day.isoformat(),
         "start": start_hm, "end": end_hm,
+        "ics_filename": ics_filename_for(res.slot.branch, day),
         "created_at": datetime.now(_utc.utc).isoformat(timespec="seconds"),
         "cancelled": False,
     })
@@ -546,6 +547,15 @@ def cancel_booking(reference: str, last_name: str, booking_id: str = "") -> dict
         return {"ok": False, "message": f"request failed: {exc}"}
 
 
+def ics_dir() -> Path:
+    return Path(os.environ.get("BOOK_ICS_DIR") or Path(__file__).parent)
+
+
+def ics_filename_for(branch: str, day: date_cls) -> str:
+    slug = "".join(c.lower() if c.isalnum() else "-" for c in branch).strip("-")
+    return f"mcpl-{slug}-{day.isoformat()}.ics"
+
+
 def _ics_escape(text: str) -> str:
     return (text.replace("\\", "\\\\").replace("\n", "\\n")
                 .replace(",", "\\,").replace(";", "\\;"))
@@ -580,9 +590,7 @@ def write_ics(res: BookingResult, day: date_cls, start_hm: str, end_hm: str) -> 
         f"DESCRIPTION:{_ics_escape(f'{slot.branch} - {slot.room_name} MCPL in 30 minutes')}",
         "TRIGGER:-PT30M", "END:VALARM", "END:VEVENT", "END:VCALENDAR",
     ]
-    branch_slug = "".join(c.lower() if c.isalnum() else "-" for c in slot.branch).strip("-")
-    out_dir = Path(os.environ.get("BOOK_ICS_DIR") or Path(__file__).parent)
-    path = out_dir / f"mcpl-{branch_slug}-{day.isoformat()}.ics"
+    path = ics_dir() / ics_filename_for(slot.branch, day)
     path.write_text("\r\n".join(lines) + "\r\n")
     return str(path)
 

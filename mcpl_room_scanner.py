@@ -67,6 +67,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import smtplib
 import sys
 from dataclasses import dataclass, field
@@ -441,11 +442,108 @@ def book_room(slot: OpenSlot, day: date_cls, start_hm: str, end_hm: str,
             result.reference = str(data.get("reference", ""))
             result.booking_id = str(data.get("id", ""))
             result.message = str(data.get("message", "booking confirmed"))
+            record_booking(result, day, start_hm, end_hm)
         else:
             result.message = str(data.get("message") or "booking rejected (no message)")
     except requests.RequestException as exc:
         result.message = f"request failed: {exc}"
     return result
+
+
+# --------------------------------------------------------------------------
+# Booking ledger + cancellation
+# --------------------------------------------------------------------------
+
+BOOKINGS_FILE = Path(os.environ.get("BOOK_LEDGER")
+                     or Path(__file__).with_name("bookings.json"))
+
+
+def _load_ledger() -> list[dict]:
+    try:
+        rows = json.loads(BOOKINGS_FILE.read_text())
+        return rows if isinstance(rows, list) else []
+    except (OSError, ValueError):
+        return []
+
+
+def _save_ledger(rows: list[dict]) -> None:
+    try:
+        BOOKINGS_FILE.write_text(json.dumps(rows, indent=2))
+    except OSError:
+        pass
+
+
+def list_bookings() -> list[dict]:
+    """All recorded bookings, newest first."""
+    return list(reversed(_load_ledger()))
+
+
+def record_booking(res: "BookingResult", day: date_cls, start_hm: str, end_hm: str) -> None:
+    if not (res.ok and not res.dry_run and res.slot):
+        return
+    rows = _load_ledger()
+    rows.append({
+        "reference": res.reference, "booking_id": res.booking_id,
+        "branch": res.slot.branch, "room_name": res.slot.room_name,
+        "room_id": res.slot.room_id, "date": day.isoformat(),
+        "start": start_hm, "end": end_hm,
+        "created_at": datetime.now(_utc.utc).isoformat(timespec="seconds"),
+        "cancelled": False,
+    })
+    _save_ledger(rows)
+
+
+def cancel_booking(reference: str, last_name: str, booking_id: str = "") -> dict:
+    """Cancel a room reservation via Communico's last-name + reference flow
+    (no login). Returns {ok, message, booking_id}."""
+    reference = (reference or "").strip()
+    last_name = (last_name or "").strip()
+    if not reference or not last_name:
+        return {"ok": False, "message": "need both last name and reference"}
+
+    base = RESERVE_PAGE.rsplit("/", 1)[0]  # https://mcpl.libnet.info
+    sess = requests.Session()
+    sess.headers.update({"User-Agent": REQUEST_HEADERS["User-Agent"],
+                         "X-Requested-With": "XMLHttpRequest"})
+    try:
+        look = sess.get(f"{base}/myreservations",
+                        params={"last_name": last_name, "reference": reference},
+                        timeout=REQUEST_TIMEOUT)
+        look.raise_for_status()
+        if not booking_id:
+            mobj = re.search(
+                r'class="ammev-reservation"[^>]*data-id="(\d+)"[^>]*data-reference="\s*'
+                + re.escape(reference) + r'\s*"', look.text)
+            booking_id = mobj.group(1) if mobj else ""
+        if not booking_id:
+            mobj = re.search(r'data-id="(\d+)"', look.text)
+            booking_id = mobj.group(1) if mobj else ""
+        if not booking_id:
+            return {"ok": False,
+                    "message": "no reservation found for that last name + reference"}
+
+        resp = sess.get(f"{base}/myreservations",
+                        params={"bookingid": booking_id, "ref": reference,
+                                "action": "cancel", "refund": 0},
+                        timeout=REQUEST_TIMEOUT)
+        resp.raise_for_status()
+        try:
+            data = resp.json()
+        except ValueError:
+            return {"ok": False,
+                    "message": f"unexpected cancel response (HTTP {resp.status_code})"}
+
+        ok = bool(data.get("ok"))
+        if ok:
+            rows = _load_ledger()
+            for r in rows:
+                if str(r.get("reference", "")).strip() == reference:
+                    r["cancelled"] = True
+            _save_ledger(rows)
+        return {"ok": ok, "booking_id": booking_id,
+                "message": data.get("message") or ("cancelled" if ok else "cancel rejected")}
+    except requests.RequestException as exc:
+        return {"ok": False, "message": f"request failed: {exc}"}
 
 
 def _ics_escape(text: str) -> str:

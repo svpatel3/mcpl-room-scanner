@@ -3,3 +3,4 @@ __pycache__/
 *.pyc
 mcpl_scanner.log
 mcpl-*.ics
+bookings.json

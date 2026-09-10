@@ -170,9 +170,11 @@ class BookingResult:
 # Scanning
 # --------------------------------------------------------------------------
 
-def fetch_rooms_for_date(day: date_cls, verbose: bool = False) -> list[dict]:
-    """Call the Communico API for one date across all watched branches."""
-    ids = ",".join(WATCHED_LOCATIONS.values())
+def fetch_rooms_for_date(day: date_cls, verbose: bool = False,
+                         locations: dict[str, str] | None = None) -> list[dict]:
+    """Call the Communico API for one date across `locations` (default: watched)."""
+    locations = locations or WATCHED_LOCATIONS
+    ids = ",".join(locations.values())
     url = API_URL.format(ids=ids)
     params = {
         "date": day.isoformat(),
@@ -227,7 +229,7 @@ def room_is_open_for_window(room: dict, day: date_cls, start_hm: str, end_hm: st
 
 
 def branch_name_for_location_id(location_id: str) -> str:
-    for name, lid in WATCHED_LOCATIONS.items():
+    for name, lid in ALL_LOCATIONS.items():
         if lid == location_id:
             return name
     return f"Location {location_id}"
@@ -235,7 +237,8 @@ def branch_name_for_location_id(location_id: str) -> str:
 
 def scan(days_ahead: int = DAYS_AHEAD_DEFAULT, verbose: bool = False,
          only_date: date_cls | None = None,
-         start_hm: str = TARGET_START, end_hm: str = TARGET_END) -> ScanResult:
+         start_hm: str = TARGET_START, end_hm: str = TARGET_END,
+         locations: dict[str, str] | None = None) -> ScanResult:
     result = ScanResult()
     today = datetime.now(TIMEZONE).date()
 
@@ -250,7 +253,7 @@ def scan(days_ahead: int = DAYS_AHEAD_DEFAULT, verbose: bool = False,
                 result.errors.append(f"{day}: Sunday - MCPL branches are closed.")
             continue
         try:
-            rooms = fetch_rooms_for_date(day, verbose=verbose)
+            rooms = fetch_rooms_for_date(day, verbose=verbose, locations=locations)
         except requests.RequestException as exc:
             result.errors.append(f"{day}: request failed ({exc})")
             continue

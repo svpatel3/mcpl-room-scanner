@@ -337,7 +337,12 @@ def build_email_body(result: ScanResult, scope: str, window: str = "10am-12pm") 
 # Booking (submits a real reservation to Communico - only runs with --book)
 # --------------------------------------------------------------------------
 
-BOOKING_FIELDS = ("BOOK_FIRST_NAME", "BOOK_LAST_NAME", "BOOK_EMAIL", "BOOK_LIBRARY_CARD")
+BOOKING_FIELDS = ("BOOK_FIRST_NAME", "BOOK_LAST_NAME", "BOOK_EMAIL")
+# BOOK_LIBRARY_CARD is optional: MCPL's public "unmediated" reserve form (the one
+# this script mirrors) has no library-card field at all - confirmed by checking
+# the reserve page's own HTML, which contains no librarycard input. It's only
+# sent if you've set BOOK_LIBRARY_CARD yourself, to match what a real submission
+# from that page actually contains: no card number unless the field exists.
 MYRESERVATIONS_URL = "https://mcpl.libnet.info/myreservations"
 
 
@@ -382,11 +387,12 @@ def book_room(slot: OpenSlot, day: date_cls, start_hm: str, end_hm: str,
         "contact[last_name]": os.environ["BOOK_LAST_NAME"],
         "contact[phone]": os.environ.get("BOOK_PHONE", ""),
         "contact[email]": os.environ["BOOK_EMAIL"],
-        "contact[librarycard]": os.environ["BOOK_LIBRARY_CARD"],
         "contact[group_name]": (os.environ.get("BOOK_GROUP_NAME")
                                 or f"{os.environ['BOOK_FIRST_NAME']} {os.environ['BOOK_LAST_NAME']}"),
         "contact[booking_title]": os.environ.get("BOOK_TITLE", "Study session"),
     }
+    if os.environ.get("BOOK_LIBRARY_CARD"):   # optional: not part of the real form
+        payload["contact[librarycard]"] = os.environ["BOOK_LIBRARY_CARD"]
 
     result = BookingResult(dry_run=dry_run, slot=slot,
                            start_time=start_time, end_time=end_time,
@@ -406,14 +412,15 @@ def book_room(slot: OpenSlot, day: date_cls, start_hm: str, end_hm: str,
         sess.get(RESERVE_PAGE, params={"date": day.isoformat(), "roomId": slot.room_id},
                  timeout=REQUEST_TIMEOUT).raise_for_status()
 
-        # 2. pre-flight check (validates card, catches "already booked" etc.)
+        # 2. pre-flight check (catches "already booked" / bad room, etc.)
         try:
+            chk_params = {"room_id": slot.room_id, "start_time": start_time,
+                         "end_time": end_time, "email": os.environ["BOOK_EMAIL"],
+                         "class_id": CLASS_ID}
+            if os.environ.get("BOOK_LIBRARY_CARD"):
+                chk_params["librarycard"] = os.environ["BOOK_LIBRARY_CARD"]
             chk = sess.get(f"{RESERVE_PAGE.rsplit('/', 1)[0]}/ajax/fetch/check_room_booking",
-                           params={"room_id": slot.room_id, "start_time": start_time,
-                                   "end_time": end_time,
-                                   "librarycard": os.environ["BOOK_LIBRARY_CARD"],
-                                   "email": os.environ["BOOK_EMAIL"], "class_id": CLASS_ID},
-                           timeout=REQUEST_TIMEOUT)
+                           params=chk_params, timeout=REQUEST_TIMEOUT)
             cj = chk.json() if chk.ok else {}
             if verbose:
                 print(f"  check_room_booking -> {cj}", file=sys.stderr)

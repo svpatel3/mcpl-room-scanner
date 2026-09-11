@@ -337,7 +337,6 @@ def build_email_body(result: ScanResult, scope: str, window: str = "10am-12pm") 
 # Booking (submits a real reservation to Communico - only runs with --book)
 # --------------------------------------------------------------------------
 
-BOOKING_FIELDS = ("BOOK_FIRST_NAME", "BOOK_LAST_NAME", "BOOK_EMAIL")
 # BOOK_LIBRARY_CARD is optional: MCPL's public "unmediated" reserve form (the one
 # this script mirrors) has no library-card field at all - confirmed by checking
 # the reserve page's own HTML, which contains no librarycard input. It's only
@@ -363,11 +362,29 @@ def pick_slot(slots: list[OpenSlot], branch_order: list[str]) -> OpenSlot | None
     return sorted(slots, key=lambda s: (s.branch, s.room_name))[0]
 
 
+def booking_profiles() -> dict[str, str]:
+    """Available booker identities: {suffix: display name}. "" is the default
+    profile (BOOK_FIRST_NAME/...); "2", "3", ... are BOOK_FIRST_NAME2, etc.,
+    picked up automatically from whatever's set in the env file."""
+    profiles = {}
+    if os.environ.get("BOOK_FIRST_NAME"):
+        profiles[""] = os.environ.get("BOOK_FIRST_NAME", "Me")
+    n = 2
+    while os.environ.get(f"BOOK_FIRST_NAME{n}"):
+        profiles[str(n)] = os.environ[f"BOOK_FIRST_NAME{n}"]
+        n += 1
+    return profiles
+
+
 def book_room(slot: OpenSlot, day: date_cls, start_hm: str, end_hm: str,
-              dry_run: bool = False, verbose: bool = False) -> BookingResult:
+              dry_run: bool = False, verbose: bool = False, profile: str = "") -> BookingResult:
     """Submit a room reservation to Communico for `slot` on `day` covering
-    start_hm-end_hm. Reads patron details from BOOK_* environment vars."""
-    missing = [k for k in BOOKING_FIELDS if not os.environ.get(k)]
+    start_hm-end_hm. Reads patron details from BOOK_*<profile> environment
+    vars - profile "" is the default identity, "2"/"3"/... are alternates."""
+    def env(key: str, default: str = "") -> str:
+        return os.environ.get(f"BOOK_{key}{profile}", default)
+
+    missing = [f"BOOK_{k}{profile}" for k in ("FIRST_NAME", "LAST_NAME", "EMAIL") if not env(k)]
     if missing:
         return BookingResult(ok=False,
                              message=f"missing booking details in env: {', '.join(missing)}")
@@ -383,16 +400,15 @@ def book_room(slot: OpenSlot, day: date_cls, start_hm: str, end_hm: str,
         "patron_notes": os.environ.get("BOOK_NOTES", ""),
         "customQuestions": "{}",
         "class_id": CLASS_ID,
-        "contact[first_name]": os.environ["BOOK_FIRST_NAME"],
-        "contact[last_name]": os.environ["BOOK_LAST_NAME"],
-        "contact[phone]": os.environ.get("BOOK_PHONE", ""),
-        "contact[email]": os.environ["BOOK_EMAIL"],
-        "contact[group_name]": (os.environ.get("BOOK_GROUP_NAME")
-                                or f"{os.environ['BOOK_FIRST_NAME']} {os.environ['BOOK_LAST_NAME']}"),
-        "contact[booking_title]": os.environ.get("BOOK_TITLE", "Study session"),
+        "contact[first_name]": env("FIRST_NAME"),
+        "contact[last_name]": env("LAST_NAME"),
+        "contact[phone]": env("PHONE"),
+        "contact[email]": env("EMAIL"),
+        "contact[group_name]": env("GROUP_NAME") or f"{env('FIRST_NAME')} {env('LAST_NAME')}",
+        "contact[booking_title]": env("TITLE", "Study session"),
     }
-    if os.environ.get("BOOK_LIBRARY_CARD"):   # optional: not part of the real form
-        payload["contact[librarycard]"] = os.environ["BOOK_LIBRARY_CARD"]
+    if env("LIBRARY_CARD"):   # optional: not part of the real form
+        payload["contact[librarycard]"] = env("LIBRARY_CARD")
 
     result = BookingResult(dry_run=dry_run, slot=slot,
                            start_time=start_time, end_time=end_time,
@@ -415,10 +431,10 @@ def book_room(slot: OpenSlot, day: date_cls, start_hm: str, end_hm: str,
         # 2. pre-flight check (catches "already booked" / bad room, etc.)
         try:
             chk_params = {"room_id": slot.room_id, "start_time": start_time,
-                         "end_time": end_time, "email": os.environ["BOOK_EMAIL"],
+                         "end_time": end_time, "email": env("EMAIL"),
                          "class_id": CLASS_ID}
-            if os.environ.get("BOOK_LIBRARY_CARD"):
-                chk_params["librarycard"] = os.environ["BOOK_LIBRARY_CARD"]
+            if env("LIBRARY_CARD"):
+                chk_params["librarycard"] = env("LIBRARY_CARD")
             chk = sess.get(f"{RESERVE_PAGE.rsplit('/', 1)[0]}/ajax/fetch/check_room_booking",
                            params=chk_params, timeout=REQUEST_TIMEOUT)
             cj = chk.json() if chk.ok else {}
@@ -452,7 +468,7 @@ def book_room(slot: OpenSlot, day: date_cls, start_hm: str, end_hm: str,
             result.reference = str(data.get("reference", ""))
             result.booking_id = str(data.get("id", ""))
             result.message = str(data.get("message", "booking confirmed"))
-            record_booking(result, day, start_hm, end_hm)
+            record_booking(result, day, start_hm, end_hm, profile)
         else:
             result.message = str(data.get("message") or "booking rejected (no message)")
     except requests.RequestException as exc:
@@ -488,7 +504,8 @@ def list_bookings() -> list[dict]:
     return list(reversed(_load_ledger()))
 
 
-def record_booking(res: "BookingResult", day: date_cls, start_hm: str, end_hm: str) -> None:
+def record_booking(res: "BookingResult", day: date_cls, start_hm: str, end_hm: str,
+                   profile: str = "") -> None:
     if not (res.ok and not res.dry_run and res.slot):
         return
     rows = _load_ledger()
@@ -498,6 +515,8 @@ def record_booking(res: "BookingResult", day: date_cls, start_hm: str, end_hm: s
         "room_id": res.slot.room_id, "date": day.isoformat(),
         "start": start_hm, "end": end_hm,
         "ics_filename": ics_filename_for(res.slot.branch, day),
+        "booked_as": os.environ.get(f"BOOK_FIRST_NAME{profile}", ""),
+        "last_name": os.environ.get(f"BOOK_LAST_NAME{profile}", ""),
         "created_at": datetime.now(_utc.utc).isoformat(timespec="seconds"),
         "cancelled": False,
     })
